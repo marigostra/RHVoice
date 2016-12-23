@@ -217,7 +217,7 @@ def configure(env):
     if env["PLATFORM"]=="win32":
         env.AppendUnique(LIBS="kernel32")
     conf.Finish()
-    src_subdirs=["third-party","core","lib","utils"]
+    src_subdirs=["third-party","core","lib","utils","jni"]
     if env["audio_libs"]:
         src_subdirs.append("audio")
         src_subdirs.append("test")
