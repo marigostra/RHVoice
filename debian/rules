@@ -7,9 +7,11 @@
 %:
 	dh $@  --with autotools-dev
 
-
 build:
-	scons prefix=debian/rhvoice
+	scons prefix=`realpath debian/rhvoice`/usr
 
 override_dh_auto_install:
 	scons install
+	mv debian/rhvoice/usr/etc debian/rhvoice/etc
+	mkdir -p debian/rhvoice/usr/lib/speech-dispatcher-modules
+	mv debian/rhvoice/usr/bin/sd_rhvoice debian/rhvoice/usr/lib/speech-dispatcher-modules

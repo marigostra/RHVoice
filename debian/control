@@ -2,7 +2,7 @@ Source: rhvoice
 Section: unknown
 Priority: optional
 Maintainer: Michael Pozhidaev <msp@luwrain.org>
-Build-Depends: debhelper (>= 8.0.0), scons
+Build-Depends: debhelper (>= 8.0.0), scons, libao-dev, libspeechd-dev 
 Standards-Version: 3.9.4
 Homepage: https://github.com/olga-yakovleva/
 Vcs-Git: https://github.com/Olga-Yakovleva/RHVoice
