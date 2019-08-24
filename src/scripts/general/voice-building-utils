@@ -37,7 +37,12 @@ from scipy.io import wavfile
 
 version_pattern=re.compile(r"(?m)^\s*\$ver\s*=\s*'(\d+)'\s*;\s*$")
 scriptdir=os.path.abspath(os.path.dirname(__file__))
+RHVoice_bindir=os.path.normpath(os.path.join(scriptdir,"..","..","..","local","bin"))
+datadir=os.path.normpath(os.path.join(scriptdir,"..","..","..","data"))
+langdir=os.path.join(datadir,"languages")
+voxdir=os.path.join(datadir,"voices")
 workdir=os.path.abspath(".")
+dataset="RHVoice"
 parser=argparse.ArgumentParser(description="A few helper commands augmenting the standard HTS demo script")
 subparsers=parser.add_subparsers()
 
@@ -104,7 +109,7 @@ class task(object):
 
 	def get_phoneset(self):
 		phoneset=dict()
-		doc=xml.parse(self.settings["phoneset"])
+		doc=xml.parse(os.path.join(langdir,self.settings["language"],"phonemes.xml"))
 		for elem in doc.iterfind("phoneme"):
 			name=elem.get("name")
 			features=dict()
@@ -140,10 +145,10 @@ class configurator(task):
 		for name in ["--with-sptk-search-path","--with-hts-search-path","--with-hts-engine-search-path"]:
 			params[name]=self.settings["bindir"]
 		params["SPEAKER"]=self.settings["speaker"]
-		params["DATASET"]=self.settings["dataset"]
+		params["DATASET"]=dataset
 		params["SAMPFREQ"]=self.settings["sample_rate"]
 		params.update(self.get_analysis_params())
-		params["USEGV"]=1 if self.settings["use_gv"] else 0
+		params["USEGV"]=1 if self.settings.get("use_gv",False) else 0
 		params["USEMSPF"]=0
 		params["NITER"]=10
 		return params
@@ -183,18 +188,18 @@ class recordings_importer(task):
 			files.append([inpath,inname,key])
 		files.sort(key=lambda x: x[-1])
 		for i,item in enumerate(files):
-			item[-1]="{}_{}_{:04}".format(self.settings["dataset"],self.settings["speaker"],i+1)
+			item[-1]="{}_{}_{:04}".format(dataset,self.settings["speaker"],i+1)
 		return files
 
 	def process(self,inpath,inname,outname):
 		print("Processing {}".format(inname))
-		cmd=["praat","--run",
+		cmd=[self.settings.get("praat_path","praat"),"--run",
 			 os.path.join(scriptdir,"import.praat"),
 			 inpath,
 			 os.path.join(workdir,"data","wav",outname+".wav"),
 			 os.path.join(workdir,"data","raw",outname+".raw"),
 			 str(self.settings["sample_rate"]),
-			 "1" if self.settings["invert"] else "0",
+			 "1" if self.settings.get("invert",False) else "0",
 				 str(self.settings.get("silence_threshold",-40))]
 		subprocess.check_call(cmd)
 
@@ -205,8 +210,12 @@ class recordings_importer(task):
 			if not os.path.isdir(dir):
 				os.mkdir(dir)
 		files=self.get_file_list()
+		mapping=collections.OrderedDict()
 		for inpath,inname,outname in files:
 			self.process(inpath,inname,outname)
+			mapping[outname]=os.path.splitext(inname)[0]
+		with open("file_name_mapping.json","w") as f:
+			json.dump(mapping,f,indent=0)
 
 class htk_segmenter(task):
 	def register(self):
@@ -253,13 +262,15 @@ class htk_segmenter(task):
 		self.param_conf_path=os.path.join(self.workdir,"param.conf")
 		self.hmmdir=os.path.join(self.workdir,"hmm")
 		self.proto_path=os.path.join(self.workdir,"proto")
+		with open("file_name_mapping.json") as f:
+			self.file_name_mapping=json.load(f)
 
 	def transcribe(self):
 		self.transcriptions=[]
 		self.lex={"SILENCE":[["pau"]]}
 		phoneset=set()
 		trans_path=os.path.join(self.workdir,"transcription")
-		subprocess.check_call(["RHVoice-transcribe-sentences","-b","ssil",self.settings["text"],trans_path])
+		subprocess.check_call([os.path.join(RHVoice_bindir,"RHVoice-transcribe-sentences"),"-b","ssil",self.settings["text"],trans_path])
 		i=-1
 		with open(trans_path,"r") as f:
 			for line in f:
@@ -506,6 +517,23 @@ class htk_segmenter(task):
 		self.hrun("HVite","-o","SW","-l","*","-b","SILENCE","-C",self.param_conf_path,"-a","-H",os.path.join(moddir,"macros"),"-H",os.path.join(moddir,"hmmdefs"),"-i",outmlf1,"-m","-t","250.0","150.0","1000.0","-y","lab","-I",inmlf,"-S",self.mfcc_scp_path,dict_path,phlist,tag="align{}".format(j))
 		print("Done")
 		self.hrun("HLEd","-l","*","-i",outmlf2,os.path.join(scriptdir,"pau.led"),outmlf1,tag="fixpau{}".format(j))
+		self.find_problematic_alignments(j)
+
+	def find_problematic_alignments(self,j):
+		stats=collections.Counter()
+		lines=self.read_lines(os.path.join(self.workdir,"log","HVite_align{}".format(j)))
+		for line in lines:
+			m=re.match(u"^Aligning File: .+/([^/]+)\\.mfcc$",line)
+			if m:
+				name=m.group(1)
+				src_name=self.file_name_mapping[name]
+				continue
+			if not line.startswith("No tokens survived to final node of network"):
+				continue
+			stats[src_name]+=1
+		with codecs.open(os.path.join(self.workdir,"problematic_files_{}.txt".format(j)),"w","utf-8") as f:
+			for name,count in stats.most_common():
+				f.write(u"{}\t{}\n".format(name,count))
 
 	def load_alignments(self,j):
 		path=os.path.join(self.workdir,"phones{}.mlf".format(j))
@@ -588,8 +616,8 @@ class labeller(task):
 		for dir in [labdir,testdir]:
 			if not os.path.isdir(dir):
 				os.mkdir(dir)
-		subprocess.check_call(["RHVoice-make-hts-labels","-l",os.path.join("data","labels","mono"),self.settings["text"],labdir])
-		subprocess.check_call(["RHVoice-make-hts-labels","-p","test",self.settings["test"],testdir])
+		subprocess.check_call([os.path.join(RHVoice_bindir,"RHVoice-make-hts-labels"),"-l",os.path.join("data","labels","mono"),self.settings["text"],labdir])
+		subprocess.check_call([os.path.join(RHVoice_bindir,"RHVoice-make-hts-labels"),"-p","test",self.settings["test"],testdir])
 		os.chdir("data")
 		subprocess.check_call(["make","mlf"])
 		subprocess.check_call(["make","list"])
@@ -605,7 +633,7 @@ class f0_extracter(task):
 		assert(method in ["praat_ac","praat_cc"])
 		wavfile.write("utt.wav",self.settings["sample_rate"],numpy.fromfile(filepath,numpy.int32))
 		voicing_threshold=self.settings.get(method+"_voicing_threshold",0.45)
-		command=["praat","--run"]
+		command=[self.settings.get("praat_path","praat"),"--run"]
 		command.append(os.path.join(scriptdir,"print-pitch.praat"))
 		command.append(os.path.abspath("utt.wav"))
 		command.append(str(min_f0))
@@ -731,28 +759,32 @@ class f0_extracter(task):
 						lf0=math.log(f0)
 					f.write(struct.pack("=f",lf0))
 
-class f0_stats_computer(f0_extracter):
+class f0_range_computer(f0_extracter):
 	def register(self):
-		subparser=subparsers.add_parser("f0-stats")
+		subparser=subparsers.add_parser("guess-f0-range")
 		subparser.set_defaults(func=self)
 
 	def __call__(self,args):
 		raw_dir=os.path.join("data","raw")
-		all_values=list()
+		data=list()
 		for name in sorted(os.listdir(raw_dir)):
 			print("Processing {}".format(name))
-			values=self.extract_with_sptk(os.path.join(raw_dir,name),"sptk_reaper",40,600)
-			all_values.extend([v for v in values if v!=0])
-		s={}
-		for p in [1,2,3,4,5,10,25,50,75,90,95,96,97,98,99]:
-			v=stats.scoreatpercentile(all_values,p)
-			s[p]=v
-			print("p{}={}".format(p,v))
-		min_f0=numpy.int(numpy.round(0.72*stats.scoreatpercentile(all_values,35)))
-		max_f0=numpy.int(numpy.round(1.9*stats.scoreatpercentile(all_values,65)))
-		print("Suggested f0 range:")
-		print("Minimum={}".format(min_f0))
-		print("Maximum={}".format(max_f0))
+			values=self.extract_with_sptk(os.path.join(raw_dir,name),"sptk_rapt",40,700)
+			values=[v for v in values if v!=0]
+			data.extend(numpy.log(values))
+		data=numpy.array(data)
+		m=numpy.mean(data)
+		d=3.0*numpy.std(data)
+		min_f0=numpy.int(numpy.round(numpy.exp(m-d)))
+		max_f0=numpy.int(numpy.round(numpy.exp(m+d)))
+		with open("training.cfg") as f:
+			settings=json.load(f,object_pairs_hook=collections.OrderedDict)
+		settings["lower_f0"]=min_f0
+		settings["upper_f0"]=max_f0
+		with open("tmp.cfg","w") as f:
+			json.dump(settings,f,indent=0)
+		os.rename("tmp.cfg","training.cfg")
+		print("Saved in training.cfg: {} - {} HZ".format(min_f0,max_f0))
 
 class synthesizer(task):
 	def register(self):
@@ -947,7 +979,7 @@ class questions_maker(task):
 
 	def load_hts_features(self):
 		features=collections.OrderedDict()
-		doc=xml.parse(self.settings["hts_label_spec"])
+		doc=xml.parse(os.path.join(langdir,self.settings["language"],"labelling.xml"))
 		prefix=""
 		for elem in doc.find("format").iterfind("feature"):
 			name=elem.get("name")
@@ -1059,7 +1091,7 @@ class realigner(task):
 
 	def update_mlf(self):
 		fmt_args={}
-		fmt_args["dataset"]=self.settings["dataset"]
+		fmt_args["dataset"]=dataset
 		fmt_args["speaker"]=self.settings["speaker"]
 		fmt_args["dir"]=os.path.abspath(self.workdir)
 		for type in ["mono","full"]:
@@ -1107,7 +1139,11 @@ class initializer(task):
 
 	def __call__(self,args):
 		assert(len(os.listdir(workdir))==0)
-		shutil.copy2(os.path.join(scriptdir,"training.cfg"),workdir)
+		with open(os.path.join(scriptdir,"training.cfg")) as ifp:
+			settings=json.load(ifp,object_pairs_hook=collections.OrderedDict)
+		settings["outdir"]=voxdir
+		with open(os.path.join(workdir,"training.cfg"),"w") as ofp:
+			json.dump(settings,ofp,indent=0)
 		htsdir=os.path.abspath(os.path.join(scriptdir,"..","hts"))
 		for name in sorted(os.listdir(htsdir)):
 			inpath=os.path.join(htsdir,name)
@@ -1232,7 +1268,7 @@ class voice_exporter(task):
 		self.save_config(params,path)
 
 	def copy_voice(self):
-		inpath=os.path.join(self.indir,self.settings["dataset"]+"_"+self.settings["speaker"]+".htsvoice")
+		inpath=os.path.join(self.indir,dataset+"_"+self.settings["speaker"]+".htsvoice")
 		outpath=os.path.join(self.modoutdir,"voice.data")
 		shutil.copy(inpath,outpath)
 
@@ -1311,7 +1347,7 @@ class voice_exporter(task):
 			self._version=args.version
 		self.voice_format="4"
 		self.indir=os.path.abspath(os.path.join("voices","qst001",self.version_name))
-		self.outdir=os.path.abspath(self.settings["outdir"])
+		self.outdir=os.path.abspath(os.path.join(self.settings["outdir"],self.settings["speaker"].lower()))
 		self.modoutdir=os.path.join(self.outdir,str(self.settings["sample_rate"]))
 		if not os.path.isdir(self.modoutdir):
 			os.makedirs(self.modoutdir)
@@ -1495,7 +1531,7 @@ class bap_extractor(task):
 			self.process(base)
 
 if __name__=="__main__":
-	for cls in [initializer,configurator,recordings_importer,labeller,f0_extracter,questions_maker,f0_stats_computer,synthesizer,realigner,htk_segmenter,lpf_maker,voice_exporter,bap_extractor]:
+	for cls in [initializer,configurator,recordings_importer,labeller,f0_extracter,questions_maker,f0_range_computer,synthesizer,realigner,htk_segmenter,lpf_maker,voice_exporter,bap_extractor]:
 		obj=cls()
 		obj.register()
 	args=parser.parse_args()

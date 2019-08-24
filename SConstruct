@@ -1,4 +1,4 @@
-# Copyright (C) 2010, 2011, 2012, 2013, 2014  Olga Yakovleva <yakovleva.o.v@gmail.com>
+# Copyright (C) 2010, 2011, 2012, 2013, 2014, 2018  Olga Yakovleva <yakovleva.o.v@gmail.com>
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -19,11 +19,15 @@ import os.path
 import subprocess
 import platform
 import datetime
+import re
 if sys.platform=="win32":
-    import _winreg
+    if sys.version_info[0]>=3:
+        import winreg
+    else:
+        import _winreg as winreg
 
 def get_version(is_release):
-    next_version="0.7.0"
+    next_version="0.7.2"
     if is_release:
         return next_version
     else:
@@ -42,18 +46,20 @@ def CheckPKG(context,name):
     context.Result(result)
     return result
 
-def CheckVS(context):
-    context.Message("Checking for Visual Studio ... ")
+def CheckMSVC(context):
+    context.Message("Checking for Visual C++ ... ")
     result=0
-    for version in ("14.0","12.0"):
-        try:
-            with _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE,r"SOFTWARE\Microsoft\VisualStudio\{}\Setup\VC".format(version),_winreg.KEY_READ|_winreg.KEY_WOW64_32KEY) as key:
-                context.env["VCDir"]=_winreg.QueryValueEx(key,"ProductDir")[0]
-            result=1
-        except WindowsError:
-            pass
-        if result!=0:
-            break
+    version=context.env.get("MSVC_VERSION",None)
+    if version is not None:
+        result=1
+    context.Result(result)
+    return result
+
+def CheckXPCompat(context):
+    context.Message("Checking for Windows XP compatibility ... ")
+    result=0
+    if context.env.get("xp_compat_enabled",False):
+        result=1
     context.Result(result)
     return result
 
@@ -65,26 +71,32 @@ def CheckNSIS(context,unicode_nsis=False):
         context.Message("Checking for NSIS... ")
     key_name=r"SOFTWARE\NSIS"+(r"\Unicode" if unicode_nsis else "")
     try:
-        with _winreg.OpenKey(_winreg.HKEY_LOCAL_MACHINE,key_name) as key:
-            context.env["makensis"]=File(os.path.join(_winreg.QueryValueEx(key,None)[0],"makensis.exe"))
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,key_name,0,winreg.KEY_READ|winreg.KEY_WOW64_32KEY) as key:
+            context.env["makensis"]=File(os.path.join(winreg.QueryValueEx(key,None)[0],"makensis.exe"))
     except WindowsError:
-        result=0
+         result=0
     context.Result(result)
     return result
 
-def get_msvc_env_vars(env,arch):
-    var_names=["path","lib","libpath","include","tmp"]
-    setenv_script=os.path.join(env["VCDir"],"vcvarsall.bat")
-    output=subprocess.check_output(["cmd","/e:on","/v:on","/c",setenv_script,arch,"&&","set"])
-    vars=dict()
-    lines=output.split("\n")
-    for line in lines:
-        trimmed_line=line.strip()
-        if trimmed_line:
-            p=trimmed_line.split("=",1)
-            if p[0].lower() in var_names:
-                vars[p[0]]=p[1]
-    return vars
+def validate_spd_version(key,val,env):
+    m=re.match(r"^\d+\.\d+",val)
+    if m is None:
+        raise Exception("Invalid value of spd_version: {}".format(val))
+
+def CheckSpdVersion(ctx):
+    ctx.Message("Checking Speech Dispatcher version ... ")
+    ver=ctx.env.get("spd_version",None)
+    if ver is not None:
+        ctx.Result(ver)
+        return ver
+    src='#include <stdio.h>\n#include <speech-dispatcher/libspeechd_version.h>\nint main() {\nint major=LIBSPEECHD_MAJOR_VERSION;\nint minor=LIBSPEECHD_MINOR_VERSION;\nprintf("%d.%d",major,minor);\nreturn 0;}'
+    res,ver=ctx.TryRun(src,".c")
+    if not res:
+        ctx.Result(res)
+        return res
+    ctx.env["spd_version"]=ver
+    ctx.Result(ver)
+    return ver
 
 def convert_flags(value):
     return value.split()
@@ -102,14 +114,34 @@ def setup():
     Execute(Mkdir(BUILDDIR))
     SConsignFile(os.path.join(BUILDDIR,"scons"))
 
+def create_languages_user_var():
+    names=sorted(os.listdir(Dir("#data").Dir("languages").abspath))
+    langs=[name.lower() for name in names]
+    name_map=dict(zip(names,langs))
+    def_langs=langs
+    if sys.platform!="win32":
+        def_langs=[lang for lang in langs if lang not in["georgian"]]
+    help="Which languages to install"
+    return ListVariable("languages",help,def_langs,langs,name_map)
+
+def create_audio_libs_user_var():
+    libs=["pulse","libao","portaudio"]
+    help="Which audio libraries to use if they are available"
+    return ListVariable("audio_libs",help,libs,libs)
+
 def create_user_vars():
     args={"DESTDIR":""}
     args.update(ARGUMENTS)
     vars=Variables(var_cache,args)
+    vars.Add(BoolVariable("dev","The build will only be used for development: no global installation, run from the source directory, compile helper utilities",False))
+    vars.Add(create_languages_user_var())
     vars.Add(BoolVariable("enable_mage","Build with MAGE",True))
+    vars.Add(create_audio_libs_user_var())
+    vars.Add("spd_version","Speech dispatcher version",validator=validate_spd_version)
     vars.Add(BoolVariable("release","Whether we are building a release",True))
     if sys.platform=="win32":
         vars.Add(BoolVariable("enable_x64","Additionally build 64-bit versions of all the libraries",True))
+        vars.Add(BoolVariable("enable_xp_compat","Target Windows XP",True))
     else:
         vars.Add("prefix","Installation prefix","/usr/local")
         vars.Add("bindir","Program installation directory","$prefix/bin")
@@ -134,20 +166,20 @@ def create_user_vars():
     vars.Add("LINKFLAGS","Linker flags",["/LTCG","/OPT:REF","/OPT:ICF"] if sys.platform=="win32" else [],converter=convert_flags)
     return vars
 
-def create_base_env(vars):
-    env_args={}
+def create_base_env(user_vars):
+    env_args={"variables":user_vars}
     if sys.platform=="win32":
-        env_args["MSVC_USE_SCRIPT"]=None
-        env_args["tools"]=["msvc","mslink","mslib","newlines"]
-        env_args["MSVC_BATCH"]=True
+        env_args["tools"]=["newlines"]
     else:
         env_args["tools"]=["default","installer"]
     env_args["tools"].extend(["textfile","library"])
-    env_args["variables"]=vars
     env_args["LIBS"]=[]
     env_args["package_name"]="RHVoice"
     env_args["CPPDEFINES"]=[("RHVOICE","1")]
     env=Environment(**env_args)
+    if env["dev"]:
+        env["prefix"]=os.path.abspath("local")
+        env["RPATH"]=env.Dir("$libdir").abspath
     env["package_version"]=get_version(env["release"])
     env.Append(CPPDEFINES=("PACKAGE",env.subst(r'\"$package_name\"')))
     env.Append(CPPDEFINES=("VERSION",env.subst(r'\"$package_version\"')))
@@ -155,14 +187,8 @@ def create_base_env(vars):
         env.Append(CPPDEFINES=("WIN32",1))
         env.Append(CPPDEFINES=("UNICODE",1))
         env.Append(CPPDEFINES=("NOMINMAX",1))
-        env.AppendUnique(CCFLAGS=["/MT"])
-        env.AppendUnique(CXXFLAGS=["/EHsc"])
-    if "gcc" in env["TOOLS"]:
-        env.MergeFlags("-pthread")
-        env.AppendUnique(CXXFLAGS=["-std=c++03"])
-        env.AppendUnique(CFLAGS=["-std=c99"])
-    if sys.platform.startswith("linux"):
-        env.Append(SHLINKFLAGS="-Wl,-soname,${TARGET.file}.${libversion.split('.')[0]}")
+    env["libcore"]="RHVoice_core"
+    env["libaudio"]="RHVoice_audio"
     return env
 
 def display_help(env,vars):
@@ -173,57 +199,92 @@ def display_help(env,vars):
     Help("You may use the following configuration variables:\n")
     Help(vars.GenerateHelpText(env))
 
-def clone_base_env(base_env,arch=None):
-    env=base_env.Clone()
+def clone_base_env(base_env,user_vars,arch=None):
+    args={}
+    if sys.platform=="win32":
+        if arch is not None:
+            args["TARGET_ARCH"]=arch
+        args["tools"]=["msvc","mslink","mslib"]
+    env=base_env.Clone(**args)
+    user_vars.Update(env)
+    if env["PLATFORM"]=="win32":
+        env.AppendUnique(CCFLAGS=["/nologo","/MT"])
+        env.AppendUnique(LINKFLAGS=["/nologo"])
+        env.AppendUnique(CXXFLAGS=["/EHsc"])
+        if env["enable_xp_compat"]:
+            env.Tool("xp_compat")
+    if "gcc" in env["TOOLS"]:
+        env.MergeFlags("-pthread")
+        env.AppendUnique(CXXFLAGS=["-std=c++03"])
+        env.AppendUnique(CFLAGS=["-std=c99"])
     if sys.platform=="win32":
         bits="64" if arch.endswith("64") else "32"
         env["BUILDDIR"]=os.path.join(BUILDDIR,arch)
         env["CPPPATH"]=env["CPPPATH"+bits]
         env["LIBPATH"]=env["LIBPATH"+bits]
-        env["ENV"]=get_msvc_env_vars(env,arch)
     else:
         env["BUILDDIR"]=BUILDDIR
     third_party_dir=os.path.join("src","third-party")
     for path in Glob(os.path.join(third_party_dir,"*"),strings=True):
         if os.path.isdir(path):
             env.Prepend(CPPPATH=("#"+path))
-    env.Prepend(CPPPATH=(".",os.path.join("#src","include")))
+    env.Prepend(CPPPATH=(os.path.join("#"+env["BUILDDIR"],"include"),".",os.path.join("#src","include")))
     return env
 
 def configure(env):
+    tests={"CheckPKGConfig":CheckPKGConfig,"CheckPKG":CheckPKG,"CheckSpdVersion":CheckSpdVersion}
+    if env["PLATFORM"]=="win32":
+        tests["CheckMSVC"]=CheckMSVC
+        tests["CheckXPCompat"]=CheckXPCompat
     conf=env.Configure(conf_dir=os.path.join(env["BUILDDIR"],"configure_tests"),
                        log_file=os.path.join(env["BUILDDIR"],"configure.log"),
-                       custom_tests={"CheckPKGConfig":CheckPKGConfig,"CheckPKG":CheckPKG})
+                       config_h=os.path.join(env["BUILDDIR"],"include","config.h"),
+                       custom_tests=tests)
+    if env["PLATFORM"]=="win32":
+        if not conf.CheckMSVC():
+            print("Error: Visual C++ is not installed")
+            exit(1)
+        print("Visual C++ version is {}".format(env["MSVC_VERSION"]))
+        if env["enable_xp_compat"] and not conf.CheckXPCompat():
+            print("Error: Windows XP compatibility cannot be enabled")
+            exit(1)
     if not conf.CheckCC():
-        print "The C compiler is not working"
+        print("The C compiler is not working")
         exit(1)
     if not conf.CheckCXX():
-        print "The C++ compiler is not working"
+        print("The C++ compiler is not working")
         exit(1)
 # has_sox=conf.CheckLibWithHeader("sox","sox.h","C",call='sox_init();',autoadd=0)
 # if not has_sox:
-#     print "Error: cannot link with libsox"
+#     print("Error: cannot link with libsox")
 #     exit(1)
 # env.PrependUnique(LIBS="sox")
-    env["audio_libs"]=set()
     has_giomm=False
     has_pkg_config=conf.CheckPKGConfig()
     if has_pkg_config:
-        if conf.CheckPKG("libpulse-simple"):
-            env["audio_libs"].add("pulse")
-        if conf.CheckPKG("ao"):
-            env["audio_libs"].add("libao")
-        if conf.CheckPKG("portaudio-2.0"):
-            env["audio_libs"].add("portaudio")
+        if "pulse" in env["audio_libs"] and not conf.CheckPKG("libpulse-simple"):
+            env["audio_libs"].remove("pulse")
+        if "libao" in env["audio_libs"] and not conf.CheckPKG("ao"):
+            env["audio_libs"].remove("libao")
+        if "portaudio" in env["audio_libs"] and not conf.CheckPKG("portaudio-2.0"):
+            env["audio_libs"].remove("portaudio")
+        if env["audio_libs"]:
+            conf.CheckSpdVersion()
+    else:
+        env["audio_libs"]=[]
 #        has_giomm=conf.CheckPKG("giomm-2.4")
     if env["PLATFORM"]=="win32":
         env.AppendUnique(LIBS="kernel32")
     conf.Finish()
-    src_subdirs=["third-party","core","lib","utils"]
+    env.Prepend(LIBPATH=os.path.join("#"+env["BUILDDIR"],"core"))
+    src_subdirs=["third-party","core","lib"]
+    if env["dev"]:
+        src_subdirs.append("utils")
     if env["audio_libs"]:
         src_subdirs.append("audio")
         src_subdirs.append("test")
         src_subdirs.append("sd_module")
+        env.Prepend(LIBPATH=os.path.join("#"+env["BUILDDIR"],"audio"))
     if has_giomm:
         src_subdirs.append("service")
     if env["PLATFORM"]=="win32":
@@ -232,8 +293,8 @@ def configure(env):
         src_subdirs.append("include")
     return src_subdirs
 
-def build_binaries(base_env,arch=None):
-    env=clone_base_env(base_env,arch)
+def build_binaries(base_env,user_vars,arch=None):
+    env=clone_base_env(base_env,user_vars,arch)
     if env["BUILDDIR"]!=BUILDDIR:
         Execute(Mkdir(env["BUILDDIR"]))
     if arch:
@@ -245,8 +306,8 @@ def build_binaries(base_env,arch=None):
                    exports={"env":env},
                    duplicate=0)
 
-def build_for_linux(base_env):
-    build_binaries(base_env)
+def build_for_linux(base_env,user_vars):
+    build_binaries(base_env,user_vars)
     for subdir in ["data","config"]:
         SConscript(os.path.join(subdir,"SConscript"),exports={"env":base_env},
                    variant_dir=os.path.join(BUILDDIR,subdir),
@@ -255,19 +316,16 @@ def build_for_linux(base_env):
 def preconfigure_for_windows(env):
     conf=env.Configure(conf_dir=os.path.join(BUILDDIR,"configure_tests"),
                        log_file=os.path.join(BUILDDIR,"configure.log"),
-                       custom_tests={"CheckVS":CheckVS,"CheckNSIS":CheckNSIS})
-    if not conf.CheckVS():
-        print("Error: Visual Studio is not installed")
-        exit(1)
+                       custom_tests={"CheckNSIS":CheckNSIS})
     if not conf.CheckNSIS(True):
         conf.CheckNSIS()
     conf.Finish()
 
-def build_for_windows(base_env):
+def build_for_windows(base_env,user_vars):
     preconfigure_for_windows(base_env)
-    build_binaries(base_env,"x86")
+    build_binaries(base_env,user_vars,"x86")
     if base_env["enable_x64"]:
-        build_binaries(base_env,"x64")
+        build_binaries(base_env,user_vars,"x86_64")
     SConscript(os.path.join("data","SConscript"),
                variant_dir=os.path.join(BUILDDIR,"data"),
                exports={"env":base_env},
@@ -293,6 +351,6 @@ base_env=create_base_env(vars)
 display_help(base_env,vars)
 vars.Save(var_cache,base_env)
 if sys.platform=="win32":
-    build_for_windows(base_env)
+    build_for_windows(base_env,vars)
 else:
-    build_for_linux(base_env)
+    build_for_linux(base_env,vars)

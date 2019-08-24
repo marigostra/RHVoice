@@ -1,4 +1,4 @@
-/* Copyright (C) 2012, 2013  Olga Yakovleva <yakovleva.o.v@gmail.com> */
+/* Copyright (C) 2012, 2013, 2018  Olga Yakovleva <yakovleva.o.v@gmail.com> */
 
 /* This program is free software: you can redistribute it and/or modify */
 /* it under the terms of the GNU General Public License as published by */
@@ -18,6 +18,15 @@
 #include "core/voice_profile.hpp"
 #include "list_voices.hpp"
 #include "io.hpp"
+
+namespace
+{
+#if ((SPD_MAJOR==0) && (SPD_MINOR<9))
+  const char sep=' ';
+#else
+  const char sep='\t';
+  #endif
+}
 
 namespace RHVoice
 {
@@ -46,7 +55,7 @@ namespace RHVoice
                   language_code=it->primary()->get_language()->get_alpha2_code();
                   if(language_code.empty())
                     language_code="none";
-                  r("200-",voice_name," ",language_code," ",dialect);
+                  r("200-",voice_name,sep,language_code,sep,dialect);
                 }
               r("200 OK VOICE LIST SENT");
             }
