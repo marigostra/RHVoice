@@ -1,5 +1,5 @@
-rhvoice (0.7.0-1) unstable; urgency=low
+rhvoice (0.7.1-lwr1) unstable; urgency=low
 
   * Initial release
 
- -- Michael Pozhidaev <michael.pozhidaev@gmail.com>  Sun, 01 Jul 2018 03:43:44 +0700
+ -- Michael Pozhidaev <msp@luwrain.org>  Sat, 24 Aug 2019 03:43:44 +0700

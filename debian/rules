@@ -6,3 +6,10 @@
 
 %:
 	dh $@  --with autotools-dev
+
+
+build:
+	scons prefix=debian/rhvoice
+
+override_dh_auto_install:
+	scons install

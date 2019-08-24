@@ -1,12 +1,11 @@
 Source: rhvoice
 Section: unknown
 Priority: optional
-Maintainer: Michael Pozhidaev <michael.pozhidaev@gmail.com>
-Build-Depends: debhelper (>= 8.0.0)
+Maintainer: Michael Pozhidaev <msp@luwrain.org>
+Build-Depends: debhelper (>= 8.0.0), scons
 Standards-Version: 3.9.4
 Homepage: https://github.com/olga-yakovleva/
 Vcs-Git: https://github.com/Olga-Yakovleva/RHVoice
-#Vcs-Browser: http://git.debian.org/?p=collab-maint/rhvoice.git;a=summary
 
 Package: rhvoice
 Architecture: any
